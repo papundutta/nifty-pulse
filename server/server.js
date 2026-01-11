@@ -1,25 +1,26 @@
 /**
- * NIFTY Options Chain Backend Server (Anti-Bot Enhanced)
+ * NIFTY Options Chain Backend Server (Puppeteer Solution)
  * 
- * This version uses better techniques to bypass NSE's bot detection:
- * - Proper session flow with delays
- * - Complete browser-like headers
- * - Cookie persistence
- * - Retry with exponential backoff
+ * This version uses Puppeteer to bypass NSE's bot detection by using a real
+ * Chrome browser instance. This is the most reliable method for scraping NSE data.
  * 
- * Alternative: If this still fails, consider using Puppeteer or a proxy service
+ * Features:
+ * - Uses headless Chrome to appear as a real browser
+ * - Automatic session management and cookie handling
+ * - Page reuse to minimize resource usage
+ * - Configurable polling interval
+ * - Graceful error recovery
  * 
- * Usage:
- * 1. Install: npm install express axios cors tough-cookie
- * 2. Run: node server.js
- * 3. If still getting 403, you may need to use a headless browser approach
+ * Installation:
+ * 1. npm install express cors puppeteer
+ * 2. node server.js
+ * 
+ * Note: First run will download Chromium (~170MB), please be patient
  */
 
 const express = require('express');
-const axios = require('axios');
 const cors = require('cors');
-const { CookieJar } = require('tough-cookie');
-const { wrapper } = require('axios-cookiejar-support');
+const puppeteer = require('puppeteer');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -31,116 +32,108 @@ app.use(cors({
 
 app.use(express.json());
 
-// Create axios instance with cookie jar
-const jar = new CookieJar();
-const client = wrapper(axios.create({ jar }));
+// Configuration
+const NSE_OPTION_CHAIN_URL = 'https://www.nseindia.com/option-chain';
+const CACHE_DURATION = 5000; // 5 seconds cache
+const PAGE_TIMEOUT = 30000; // 30 seconds timeout
 
-const NSE_BASE_URL = 'https://www.nseindia.com';
-const OPTION_CHAIN_URL = `${NSE_BASE_URL}/api/option-chain-indices?symbol=NIFTY`;
-
+// State management
+let browser = null;
+let page = null;
 let cachedData = null;
 let lastFetchTime = null;
-let sessionInitialized = false;
-let retryCount = 0;
-const MAX_RETRIES = 3;
-const CACHE_DURATION = 5000;
-
-// More complete browser headers
-const getBrowserHeaders = (isAPI = false) => {
-  const baseHeaders = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Accept-Language': 'en-US,en;q=0.9,hi;q=0.8',
-    'Accept-Encoding': 'gzip, deflate, br',
-    'Connection': 'keep-alive',
-    'DNT': '1',
-    'Upgrade-Insecure-Requests': '1',
-    'Sec-Fetch-Dest': isAPI ? 'empty' : 'document',
-    'Sec-Fetch-Mode': isAPI ? 'cors' : 'navigate',
-    'Sec-Fetch-Site': 'same-origin',
-    'Sec-Fetch-User': '?1',
-    'sec-ch-ua': '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
-    'sec-ch-ua-mobile': '?0',
-    'sec-ch-ua-platform': '"Windows"',
-  };
-
-  if (isAPI) {
-    return {
-      ...baseHeaders,
-      'Accept': '*/*',
-      'Referer': 'https://www.nseindia.com/option-chain',
-      'X-Requested-With': 'XMLHttpRequest',
-    };
-  } else {
-    return {
-      ...baseHeaders,
-      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-    };
-  }
-};
+let isInitializing = false;
+let browserReady = false;
 
 /**
- * Initialize session with proper browser flow
+ * Initialize Puppeteer browser and page
  */
-async function initSession() {
+async function initBrowser() {
+  if (isInitializing) {
+    console.log('[Browser] ⏳ Already initializing, waiting...');
+    while (isInitializing) {
+      await new Promise(resolve => setTimeout(resolve, 500));
+    }
+    return browserReady;
+  }
+
+  isInitializing = true;
+
   try {
-    console.log('\n[Session] 🌐 Starting browser-like session initialization...');
+    console.log('[Browser] 🚀 Launching Puppeteer browser...');
     
-    // Step 1: Visit homepage
-    console.log('[Session] 📍 Step 1/3: Visiting NSE homepage...');
-    await client.get(NSE_BASE_URL, {
-      headers: getBrowserHeaders(false),
-      timeout: 15000,
-      maxRedirects: 5,
+    browser = await puppeteer.launch({
+      headless: 'new', // Use new headless mode
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-accelerated-2d-canvas',
+        '--disable-gpu',
+        '--window-size=1920,1080',
+        '--disable-blink-features=AutomationControlled',
+      ],
+      defaultViewport: {
+        width: 1920,
+        height: 1080
+      }
     });
-    
-    console.log('[Session] ⏳ Waiting 2 seconds (simulating human behavior)...');
-    await new Promise(resolve => setTimeout(resolve, 2000));
-    
-    // Step 2: Visit option chain page
-    console.log('[Session] 📍 Step 2/3: Visiting option chain page...');
-    await client.get(`${NSE_BASE_URL}/option-chain`, {
-      headers: getBrowserHeaders(false),
-      timeout: 15000,
+
+    console.log('[Browser] ✅ Browser launched successfully');
+    console.log('[Browser] 📄 Creating new page...');
+
+    page = await browser.newPage();
+
+    // Set realistic user agent
+    await page.setUserAgent(
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    );
+
+    // Set extra headers
+    await page.setExtraHTTPHeaders({
+      'Accept-Language': 'en-US,en;q=0.9',
+      'Accept-Encoding': 'gzip, deflate, br',
     });
+
+    // Hide automation indicators
+    await page.evaluateOnNewDocument(() => {
+      Object.defineProperty(navigator, 'webdriver', { get: () => false });
+      Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+      Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+    });
+
+    console.log('[Browser] 🌐 Navigating to NSE option chain page...');
     
-    console.log('[Session] ⏳ Waiting 2 seconds...');
-    await new Promise(resolve => setTimeout(resolve, 2000));
-    
-    // Step 3: Visit get quotes (sometimes needed)
-    console.log('[Session] 📍 Step 3/3: Additional page visit...');
-    await client.get(`${NSE_BASE_URL}/get-quotes/equity?symbol=SBIN`, {
-      headers: getBrowserHeaders(false),
-      timeout: 15000,
-    }).catch(() => {}); // Ignore errors on this one
-    
-    console.log('[Session] ⏳ Waiting 1 second...');
-    await new Promise(resolve => setTimeout(resolve, 1000));
-    
-    const cookies = jar.getCookiesSync(NSE_BASE_URL);
-    console.log('[Session] 🍪 Cookies obtained:', cookies.length, 'cookies');
-    
-    if (cookies.length > 0) {
-      console.log('[Session] ✅ Session initialized successfully!');
-      sessionInitialized = true;
-      retryCount = 0;
-      return true;
-    } else {
-      console.log('[Session] ⚠️ No cookies received');
-      return false;
-    }
-    
+    await page.goto(NSE_OPTION_CHAIN_URL, {
+      waitUntil: 'networkidle2',
+      timeout: PAGE_TIMEOUT,
+    });
+
+    console.log('[Browser] ⏳ Waiting for page to fully load...');
+    await page.waitForTimeout(3000);
+
+    console.log('[Browser] ✅ Browser ready!');
+    browserReady = true;
+    isInitializing = false;
+    return true;
+
   } catch (error) {
-    console.error('[Session] ❌ Failed:', error.message);
-    if (error.response) {
-      console.error('[Session] Status:', error.response.status);
-      console.error('[Session] Headers:', JSON.stringify(error.response.headers, null, 2));
-    }
+    console.error('[Browser] ❌ Failed to initialize:', error.message);
+    isInitializing = false;
+    browserReady = false;
+    
+    // Cleanup on failure
+    if (page) await page.close().catch(() => {});
+    if (browser) await browser.close().catch(() => {});
+    page = null;
+    browser = null;
+    
     return false;
   }
 }
 
 /**
- * Fetch option chain data
+ * Fetch option chain data using Puppeteer
  */
 async function fetchOptionChain() {
   // Return cached data if fresh
@@ -150,187 +143,269 @@ async function fetchOptionChain() {
   }
 
   try {
-    // Initialize session if needed
-    if (!sessionInitialized) {
-      console.log('[Fetch] 🔐 Session not initialized, initializing...');
-      const success = await initSession();
+    // Initialize browser if needed
+    if (!browserReady || !page) {
+      console.log('[Fetch] 🔧 Browser not ready, initializing...');
+      const success = await initBrowser();
       if (!success) {
-        throw new Error('Failed to initialize session with NSE');
+        throw new Error('Failed to initialize browser');
       }
     }
 
-    console.log('\n[Fetch] 📡 Fetching option chain data...');
+    console.log('\n[Fetch] 📡 Fetching option chain data from NSE...');
+
+    // Navigate to option chain page if not already there
+    const currentUrl = page.url();
+    if (!currentUrl.includes('option-chain')) {
+      console.log('[Fetch] 🔄 Navigating to option chain page...');
+      await page.goto(NSE_OPTION_CHAIN_URL, {
+        waitUntil: 'networkidle2',
+        timeout: PAGE_TIMEOUT,
+      });
+      await page.waitForTimeout(2000);
+    }
+
+    // Intercept the API call
+    console.log('[Fetch] 🎣 Intercepting API response...');
     
-    const response = await client.get(OPTION_CHAIN_URL, {
-      headers: getBrowserHeaders(true),
-      timeout: 20000,
-      validateStatus: () => true,
+    const data = await page.evaluate(async () => {
+      try {
+        // Fetch the API directly from the page context
+        const response = await fetch(
+          'https://www.nseindia.com/api/option-chain-indices?symbol=NIFTY',
+          {
+            headers: {
+              'Accept': '*/*',
+              'Accept-Language': 'en-US,en;q=0.9',
+              'X-Requested-With': 'XMLHttpRequest',
+            }
+          }
+        );
+        
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+        
+        return await response.json();
+      } catch (error) {
+        throw new Error('Failed to fetch from page context: ' + error.message);
+      }
     });
 
-    console.log('[Fetch] 📊 Response Status:', response.status);
-
-    // Handle different status codes
-    if (response.status === 403 || response.status === 401) {
-      console.log('[Fetch] 🔒 Access denied, resetting session...');
-      sessionInitialized = false;
-      
-      if (retryCount < MAX_RETRIES) {
-        retryCount++;
-        const delay = Math.min(retryCount * 3000, 10000);
-        console.log(`[Fetch] 🔄 Retry ${retryCount}/${MAX_RETRIES} in ${delay/1000}s...`);
-        await new Promise(resolve => setTimeout(resolve, delay));
-        return fetchOptionChain();
-      }
-      
-      throw new Error('Access denied by NSE - possible IP block or bot detection');
-    }
-
-    if (response.status !== 200) {
-      throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-    }
-
-    // Validate response
-    if (!response.data) {
-      throw new Error('Empty response from NSE');
-    }
-
-    console.log('[Fetch] 🔍 Data keys:', Object.keys(response.data));
-
-    // Check for valid data structure
-    if (response.data.records || response.data.data) {
-      cachedData = response.data;
-      lastFetchTime = Date.now();
-      retryCount = 0;
-      
-      const spot = response.data.records?.underlyingValue || 'N/A';
-      console.log('[Fetch] ✅ Success! Spot:', spot);
-      
-      return response.data;
-    } else {
-      console.error('[Fetch] ⚠️ Unexpected structure:', JSON.stringify(response.data).substring(0, 200));
+    // Validate data
+    if (!data || (!data.records && !data.data)) {
       throw new Error('Invalid response structure');
     }
 
+    cachedData = data;
+    lastFetchTime = Date.now();
+
+    const spot = data.records?.underlyingValue || 'N/A';
+    const dataCount = data.records?.data?.length || 0;
+    
+    console.log('[Fetch] ✅ Success!');
+    console.log('[Fetch] 💹 Spot Price:', spot);
+    console.log('[Fetch] 📊 Data Points:', dataCount);
+
+    return data;
+
   } catch (error) {
     console.error('[Fetch] ❌ Error:', error.message);
-    
+
+    // Try to recover by reinitializing browser
+    if (error.message.includes('Target closed') || error.message.includes('Session closed')) {
+      console.log('[Fetch] 🔄 Browser session lost, reinitializing...');
+      browserReady = false;
+      await closeBrowser();
+      
+      // Retry once
+      if (!isInitializing) {
+        console.log('[Fetch] 🔄 Retrying after browser restart...');
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        return fetchOptionChain();
+      }
+    }
+
+    // Return stale cache if available
     if (cachedData) {
       console.log('[Fetch] 📦 Returning stale cache');
       return { ...cachedData, stale: true };
     }
-    
+
     throw error;
   }
 }
 
-// Health endpoint
+/**
+ * Close browser gracefully
+ */
+async function closeBrowser() {
+  console.log('[Browser] 🔒 Closing browser...');
+  browserReady = false;
+  
+  try {
+    if (page) {
+      await page.close();
+      page = null;
+    }
+    if (browser) {
+      await browser.close();
+      browser = null;
+    }
+    console.log('[Browser] ✅ Browser closed');
+  } catch (error) {
+    console.error('[Browser] ⚠️ Error closing browser:', error.message);
+  }
+}
+
+// Health check endpoint
 app.get('/health', (req, res) => {
   res.json({
     status: 'ok',
-    sessionInitialized,
+    browserReady,
     hasCache: !!cachedData,
     lastFetch: lastFetchTime ? new Date(lastFetchTime).toISOString() : null,
-    cookies: jar.getCookiesSync(NSE_BASE_URL).length,
+    cacheAge: lastFetchTime ? Date.now() - lastFetchTime : null,
+    uptime: process.uptime(),
   });
 });
 
-// Debug endpoint
-app.get('/debug', async (req, res) => {
-  try {
-    if (!sessionInitialized) {
-      await initSession();
-    }
-    
-    const response = await client.get(OPTION_CHAIN_URL, {
-      headers: getBrowserHeaders(true),
-      timeout: 20000,
-      validateStatus: () => true,
-    });
-    
-    res.json({
-      status: response.status,
-      cookies: jar.getCookiesSync(NSE_BASE_URL).length,
-      dataKeys: response.data ? Object.keys(response.data) : [],
-      preview: JSON.stringify(response.data).substring(0, 1000),
-      fullData: response.data,
-    });
-  } catch (error) {
-    res.status(500).json({
-      error: error.message,
-      stack: error.stack,
-    });
-  }
-});
-
-// Main endpoint
+// Main option chain endpoint
 app.get('/chain', async (req, res) => {
   try {
+    const { expiry } = req.query;
     const data = await fetchOptionChain();
+    
+    // Filter by expiry if requested
+    if (expiry && data.records?.data) {
+      const filteredData = data.records.data.filter(item => 
+        item.expiryDate === expiry
+      );
+      
+      return res.json({
+        records: {
+          ...data.records,
+          data: filteredData,
+        },
+        filtered: {
+          data: filteredData,
+        },
+        stale: data.stale || false,
+      });
+    }
+    
     res.json(data);
   } catch (error) {
+    console.error('[API] Error serving /chain:', error.message);
     res.status(503).json({
-      error: error.message,
-      suggestion: 'NSE may be blocking automated requests. Consider using a proxy or Puppeteer.',
+      error: 'Failed to fetch option chain data',
+      message: error.message,
+      browserReady,
     });
   }
 });
 
-// Expiries
+// Get available expiry dates
 app.get('/expiries', async (req, res) => {
   try {
     const data = await fetchOptionChain();
-    res.json({ expiryDates: data.records?.expiryDates || [] });
+    res.json({
+      expiryDates: data.records?.expiryDates || [],
+    });
   } catch (error) {
-    res.status(503).json({ error: error.message });
+    res.status(503).json({
+      error: 'Failed to fetch expiry dates',
+      message: error.message,
+    });
   }
 });
 
-// Spot
+// Get spot price only
 app.get('/spot', async (req, res) => {
   try {
     const data = await fetchOptionChain();
     res.json({
       underlyingValue: data.records?.underlyingValue,
-      timestamp: new Date().toISOString(),
+      timestamp: data.records?.timestamp || new Date().toISOString(),
+      change: data.records?.change || 0,
+      pChange: data.records?.pChange || 0,
     });
   } catch (error) {
-    res.status(503).json({ error: error.message });
+    res.status(503).json({
+      error: 'Failed to fetch spot price',
+      message: error.message,
+    });
   }
 });
 
+// Refresh browser endpoint (useful for debugging)
+app.post('/refresh-browser', async (req, res) => {
+  try {
+    console.log('[API] Manual browser refresh requested');
+    await closeBrowser();
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    const success = await initBrowser();
+    res.json({
+      success,
+      message: success ? 'Browser refreshed successfully' : 'Failed to refresh browser',
+    });
+  } catch (error) {
+    res.status(500).json({
+      error: error.message,
+    });
+  }
+});
+
+// Start server
 app.listen(PORT, async () => {
   console.log(`
 ╔═══════════════════════════════════════════════════════════╗
-║       NIFTY Options Chain Backend Server                  ║
+║     NIFTY Options Chain Backend (Puppeteer Edition)       ║
 ╠═══════════════════════════════════════════════════════════╣
 ║  🌐 Server: http://localhost:${PORT}                         ║
 ║                                                           ║
 ║  📌 Endpoints:                                            ║
-║     GET /chain    - Option chain data                     ║
-║     GET /health   - Server status                         ║
-║     GET /debug    - Diagnostics                           ║
+║     GET  /chain             - Full option chain data      ║
+║     GET  /chain?expiry=...  - Filter by expiry date       ║
+║     GET  /expiries          - Available expiry dates      ║
+║     GET  /spot              - Current spot price          ║
+║     GET  /health            - Server health status        ║
+║     POST /refresh-browser   - Restart browser session     ║
 ║                                                           ║
-║  ⚠️  NOTE: NSE has strong bot protection                  ║
-║     If you get 403 errors, you may need:                  ║
-║     - VPN/Proxy from India                                ║
-║     - Puppeteer-based solution                            ║
-║     - Official NSE data provider                          ║
+║  🤖 Using Puppeteer with headless Chrome                  ║
+║  ⚡ Auto-caching with 5s refresh interval                 ║
 ╚═══════════════════════════════════════════════════════════╝
   `);
+
+  console.log('\n[Startup] 🚀 Initializing Puppeteer...\n');
   
-  console.log('[Startup] 🚀 Attempting initial fetch...\n');
-  
+  // Initialize browser on startup
   try {
+    await initBrowser();
+    console.log('\n[Startup] 📊 Fetching initial data...\n');
     await fetchOptionChain();
-    console.log('\n[Startup] ✅ Server ready and working!\n');
+    console.log('\n[Startup] ✅ Server fully initialized and ready!\n');
   } catch (error) {
-    console.error('\n[Startup] ❌ Initial fetch failed');
-    console.error('[Startup] 💡 This is common with NSE\'s bot protection');
-    console.error('[Startup] 💡 The server is running - API calls may still work\n');
+    console.error('\n[Startup] ⚠️ Initial setup failed:', error.message);
+    console.log('[Startup] 💡 Server is running - browser will initialize on first request\n');
   }
 });
 
-process.on('SIGINT', () => {
-  console.log('\n👋 Shutting down...');
+// Graceful shutdown
+async function shutdown() {
+  console.log('\n[Server] 👋 Shutting down gracefully...');
+  await closeBrowser();
   process.exit(0);
+}
+
+process.on('SIGINT', shutdown);
+process.on('SIGTERM', shutdown);
+
+// Handle uncaught errors
+process.on('unhandledRejection', (error) => {
+  console.error('[Server] ⚠️ Unhandled rejection:', error.message);
+});
+
+process.on('uncaughtException', (error) => {
+  console.error('[Server] ⚠️ Uncaught exception:', error.message);
 });
