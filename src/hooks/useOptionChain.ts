@@ -27,7 +27,8 @@ interface UseOptionChainReturn {
 }
 
 // API base URL - defaults to localhost for development
-const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:3001';
+//const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:3001';
+const API_BASE = import.meta.env.VITE_API_URL || 'https://nifty-pulse.onrender.com';
 
 export function useOptionChain(refreshInterval = 5000): UseOptionChainReturn {
   const [data, setData] = useState<any[]>([]);
