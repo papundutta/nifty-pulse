@@ -5,7 +5,8 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "nodemon server.js"
+    "dev": "nodemon server.js",
+    "build": "echo 'Build complete'"
   },
   "author": "Efinlearning",
   "license": "MIT",
@@ -15,7 +16,8 @@
   "dependencies": {
     "axios": "^1.6.0",
     "cors": "^2.8.5",
-    "express": "^4.19.0"
+    "express": "^4.19.0",
+    "puppeteer": "^21.6.0"
   },
   "devDependencies": {
     "nodemon": "^3.0.0"
