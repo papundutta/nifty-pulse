@@ -1,21 +1,25 @@
 /**
- * NIFTY Options Chain Backend Server (Debug Enhanced)
+ * NIFTY Options Chain Backend Server (Anti-Bot Enhanced)
  * 
- * Features:
- * - Comprehensive logging to diagnose NSE API responses
- * - Multiple fallback strategies for different response formats
- * - Session management with proper cookie handling
+ * This version uses better techniques to bypass NSE's bot detection:
+ * - Proper session flow with delays
+ * - Complete browser-like headers
+ * - Cookie persistence
+ * - Retry with exponential backoff
+ * 
+ * Alternative: If this still fails, consider using Puppeteer or a proxy service
  * 
  * Usage:
- * 1. Install dependencies: npm install express axios cors
- * 2. Run server: node server.js
- * 3. Check console output for detailed diagnostics
+ * 1. Install: npm install express axios cors tough-cookie
+ * 2. Run: node server.js
+ * 3. If still getting 403, you may need to use a headless browser approach
  */
 
 const express = require('express');
 const axios = require('axios');
 const cors = require('cors');
-const fs = require('fs');
+const { CookieJar } = require('tough-cookie');
+const { wrapper } = require('axios-cookiejar-support');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -27,264 +31,235 @@ app.use(cors({
 
 app.use(express.json());
 
-// NSE API Configuration
+// Create axios instance with cookie jar
+const jar = new CookieJar();
+const client = wrapper(axios.create({ jar }));
+
 const NSE_BASE_URL = 'https://www.nseindia.com';
 const OPTION_CHAIN_URL = `${NSE_BASE_URL}/api/option-chain-indices?symbol=NIFTY`;
 
-// Session management
-let cookies = '';
-let lastFetchTime = null;
 let cachedData = null;
+let lastFetchTime = null;
+let sessionInitialized = false;
 let retryCount = 0;
 const MAX_RETRIES = 3;
-const CACHE_DURATION = 3000;
+const CACHE_DURATION = 5000;
 
-const getHeaders = () => ({
-  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-  'Accept': '*/*',
-  'Accept-Language': 'en-US,en;q=0.9',
-  'Accept-Encoding': 'gzip, deflate, br',
-  'Referer': 'https://www.nseindia.com/option-chain',
-  'X-Requested-With': 'XMLHttpRequest',
-  'Connection': 'keep-alive',
-  'sec-ch-ua': '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
-  'sec-ch-ua-mobile': '?0',
-  'sec-ch-ua-platform': '"Windows"',
-  'Sec-Fetch-Dest': 'empty',
-  'Sec-Fetch-Mode': 'cors',
-  'Sec-Fetch-Site': 'same-origin',
-  ...(cookies ? { 'Cookie': cookies } : {})
-});
+// More complete browser headers
+const getBrowserHeaders = (isAPI = false) => {
+  const baseHeaders = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Accept-Language': 'en-US,en;q=0.9,hi;q=0.8',
+    'Accept-Encoding': 'gzip, deflate, br',
+    'Connection': 'keep-alive',
+    'DNT': '1',
+    'Upgrade-Insecure-Requests': '1',
+    'Sec-Fetch-Dest': isAPI ? 'empty' : 'document',
+    'Sec-Fetch-Mode': isAPI ? 'cors' : 'navigate',
+    'Sec-Fetch-Site': 'same-origin',
+    'Sec-Fetch-User': '?1',
+    'sec-ch-ua': '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+    'sec-ch-ua-mobile': '?0',
+    'sec-ch-ua-platform': '"Windows"',
+  };
+
+  if (isAPI) {
+    return {
+      ...baseHeaders,
+      'Accept': '*/*',
+      'Referer': 'https://www.nseindia.com/option-chain',
+      'X-Requested-With': 'XMLHttpRequest',
+    };
+  } else {
+    return {
+      ...baseHeaders,
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+    };
+  }
+};
 
 /**
- * Initialize session by visiting NSE homepage
+ * Initialize session with proper browser flow
  */
 async function initSession() {
   try {
-    console.log('\n[Session] 🔄 Initializing NSE session...');
+    console.log('\n[Session] 🌐 Starting browser-like session initialization...');
     
-    // First, visit the homepage
-    const homeResponse = await axios.get(NSE_BASE_URL, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-      },
-      timeout: 10000,
+    // Step 1: Visit homepage
+    console.log('[Session] 📍 Step 1/3: Visiting NSE homepage...');
+    await client.get(NSE_BASE_URL, {
+      headers: getBrowserHeaders(false),
+      timeout: 15000,
+      maxRedirects: 5,
     });
     
-    let cookieSet = homeResponse.headers['set-cookie'];
-    if (cookieSet) {
-      cookies = cookieSet.map(c => c.split(';')[0]).join('; ');
-    }
+    console.log('[Session] ⏳ Waiting 2 seconds (simulating human behavior)...');
+    await new Promise(resolve => setTimeout(resolve, 2000));
     
-    console.log('[Session] 📍 Step 1: Visited homepage');
-    
-    // Then visit option chain page
-    const chainPageResponse = await axios.get(`${NSE_BASE_URL}/option-chain`, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-        ...(cookies ? { 'Cookie': cookies } : {})
-      },
-      timeout: 10000,
+    // Step 2: Visit option chain page
+    console.log('[Session] 📍 Step 2/3: Visiting option chain page...');
+    await client.get(`${NSE_BASE_URL}/option-chain`, {
+      headers: getBrowserHeaders(false),
+      timeout: 15000,
     });
     
-    const moreCookies = chainPageResponse.headers['set-cookie'];
-    if (moreCookies) {
-      const newCookies = moreCookies.map(c => c.split(';')[0]).join('; ');
-      cookies = cookies ? `${cookies}; ${newCookies}` : newCookies;
+    console.log('[Session] ⏳ Waiting 2 seconds...');
+    await new Promise(resolve => setTimeout(resolve, 2000));
+    
+    // Step 3: Visit get quotes (sometimes needed)
+    console.log('[Session] 📍 Step 3/3: Additional page visit...');
+    await client.get(`${NSE_BASE_URL}/get-quotes/equity?symbol=SBIN`, {
+      headers: getBrowserHeaders(false),
+      timeout: 15000,
+    }).catch(() => {}); // Ignore errors on this one
+    
+    console.log('[Session] ⏳ Waiting 1 second...');
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    
+    const cookies = jar.getCookiesSync(NSE_BASE_URL);
+    console.log('[Session] 🍪 Cookies obtained:', cookies.length, 'cookies');
+    
+    if (cookies.length > 0) {
+      console.log('[Session] ✅ Session initialized successfully!');
+      sessionInitialized = true;
+      retryCount = 0;
+      return true;
+    } else {
+      console.log('[Session] ⚠️ No cookies received');
+      return false;
     }
     
-    console.log('[Session] 📍 Step 2: Visited option chain page');
-    console.log('[Session] 🍪 Cookies obtained:', cookies ? 'YES' : 'NO');
-    console.log('[Session] 🍪 Cookie length:', cookies.length);
-    
-    retryCount = 0;
-    return true;
   } catch (error) {
     console.error('[Session] ❌ Failed:', error.message);
+    if (error.response) {
+      console.error('[Session] Status:', error.response.status);
+      console.error('[Session] Headers:', JSON.stringify(error.response.headers, null, 2));
+    }
     return false;
   }
 }
 
 /**
- * Fetch option chain data with comprehensive logging
+ * Fetch option chain data
  */
 async function fetchOptionChain() {
+  // Return cached data if fresh
   if (cachedData && lastFetchTime && (Date.now() - lastFetchTime) < CACHE_DURATION) {
     console.log('[Fetch] ⚡ Returning cached data');
     return cachedData;
   }
 
   try {
-    if (!cookies) {
-      console.log('[Fetch] 🔑 No cookies found, initializing session...');
-      const sessionOk = await initSession();
-      if (!sessionOk) {
-        throw new Error('Failed to establish session with NSE');
+    // Initialize session if needed
+    if (!sessionInitialized) {
+      console.log('[Fetch] 🔐 Session not initialized, initializing...');
+      const success = await initSession();
+      if (!success) {
+        throw new Error('Failed to initialize session with NSE');
       }
-      await new Promise(resolve => setTimeout(resolve, 1500));
     }
 
-    console.log('\n[Fetch] 📡 Requesting option chain data...');
-    console.log('[Fetch] 🔗 URL:', OPTION_CHAIN_URL);
+    console.log('\n[Fetch] 📡 Fetching option chain data...');
     
-    const response = await axios.get(OPTION_CHAIN_URL, {
-      headers: getHeaders(),
-      timeout: 15000,
-      validateStatus: () => true, // Accept any status
+    const response = await client.get(OPTION_CHAIN_URL, {
+      headers: getBrowserHeaders(true),
+      timeout: 20000,
+      validateStatus: () => true,
     });
 
     console.log('[Fetch] 📊 Response Status:', response.status);
-    console.log('[Fetch] 📦 Response Type:', typeof response.data);
-    console.log('[Fetch] 📦 Is Array:', Array.isArray(response.data));
-    console.log('[Fetch] 📦 Is Object:', response.data && typeof response.data === 'object');
 
-    // Save raw response for inspection
-    try {
-      fs.writeFileSync('nse_response.json', JSON.stringify(response.data, null, 2));
-      console.log('[Fetch] 💾 Raw response saved to nse_response.json');
-    } catch (e) {
-      // Ignore file write errors
-    }
-
-    // Check response status
-    if (response.status === 401 || response.status === 403) {
-      console.log('[Fetch] 🔒 Authentication failed, clearing cookies...');
-      cookies = '';
-      throw new Error('Authentication failed - session expired');
+    // Handle different status codes
+    if (response.status === 403 || response.status === 401) {
+      console.log('[Fetch] 🔒 Access denied, resetting session...');
+      sessionInitialized = false;
+      
+      if (retryCount < MAX_RETRIES) {
+        retryCount++;
+        const delay = Math.min(retryCount * 3000, 10000);
+        console.log(`[Fetch] 🔄 Retry ${retryCount}/${MAX_RETRIES} in ${delay/1000}s...`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+        return fetchOptionChain();
+      }
+      
+      throw new Error('Access denied by NSE - possible IP block or bot detection');
     }
 
     if (response.status !== 200) {
-      console.log('[Fetch] ⚠️ Non-200 status code');
       throw new Error(`HTTP ${response.status}: ${response.statusText}`);
     }
 
-    // Deep inspection of response structure
-    if (response.data) {
-      console.log('[Fetch] 🔍 Response structure analysis:');
-      console.log('  - Top-level keys:', Object.keys(response.data));
-      
-      if (response.data.records) {
-        console.log('  - records found!');
-        console.log('  - records keys:', Object.keys(response.data.records));
-        
-        if (response.data.records.data) {
-          console.log('  - records.data is array:', Array.isArray(response.data.records.data));
-          console.log('  - records.data length:', response.data.records.data?.length);
-        }
-        
-        if (response.data.records.underlyingValue) {
-          console.log('  - Spot Price:', response.data.records.underlyingValue);
-        }
-      }
-      
-      // Log first 500 chars of response
-      const preview = JSON.stringify(response.data, null, 2).substring(0, 500);
-      console.log('\n[Fetch] 📄 Response preview:\n', preview);
-      console.log('  ... (truncated)\n');
+    // Validate response
+    if (!response.data) {
+      throw new Error('Empty response from NSE');
     }
 
-    // Validate response - accept multiple formats
-    const isValid = response.data && (
-      response.data.records || 
-      response.data.data || 
-      response.data.filtered ||
-      (typeof response.data === 'object' && Object.keys(response.data).length > 0)
-    );
+    console.log('[Fetch] 🔍 Data keys:', Object.keys(response.data));
 
-    if (isValid) {
+    // Check for valid data structure
+    if (response.data.records || response.data.data) {
       cachedData = response.data;
       lastFetchTime = Date.now();
       retryCount = 0;
       
-      const spotPrice = response.data.records?.underlyingValue || 
-                       response.data.underlyingValue || 
-                       'Unknown';
-      console.log('[Fetch] ✅ Data received successfully!');
-      console.log('[Fetch] 💹 Spot Price:', spotPrice);
+      const spot = response.data.records?.underlyingValue || 'N/A';
+      console.log('[Fetch] ✅ Success! Spot:', spot);
       
       return response.data;
     } else {
-      console.error('[Fetch] ❌ Response validation failed');
-      console.error('[Fetch] Response data:', response.data);
-      throw new Error('Invalid response structure from NSE');
+      console.error('[Fetch] ⚠️ Unexpected structure:', JSON.stringify(response.data).substring(0, 200));
+      throw new Error('Invalid response structure');
     }
 
   } catch (error) {
-    console.error('\n[Fetch] ❌ ERROR:', error.message);
+    console.error('[Fetch] ❌ Error:', error.message);
     
-    if (error.response) {
-      console.error('[Fetch] Status:', error.response.status);
-      console.error('[Fetch] Status Text:', error.response.statusText);
-      
-      if (error.response.status === 401 || error.response.status === 403) {
-        cookies = '';
-        
-        if (retryCount < MAX_RETRIES) {
-          retryCount++;
-          console.log(`[Fetch] 🔄 Retry ${retryCount}/${MAX_RETRIES} in ${retryCount * 2}s...`);
-          await new Promise(resolve => setTimeout(resolve, 2000 * retryCount));
-          return fetchOptionChain();
-        }
-      }
-    }
-
     if (cachedData) {
-      console.log('[Fetch] ⚠️ Returning stale cached data');
+      console.log('[Fetch] 📦 Returning stale cache');
       return { ...cachedData, stale: true };
     }
-
+    
     throw error;
   }
 }
 
+// Health endpoint
+app.get('/health', (req, res) => {
+  res.json({
+    status: 'ok',
+    sessionInitialized,
+    hasCache: !!cachedData,
+    lastFetch: lastFetchTime ? new Date(lastFetchTime).toISOString() : null,
+    cookies: jar.getCookiesSync(NSE_BASE_URL).length,
+  });
+});
+
 // Debug endpoint
 app.get('/debug', async (req, res) => {
   try {
-    console.log('\n[DEBUG] Manual debug request received');
-    
-    if (!cookies) {
+    if (!sessionInitialized) {
       await initSession();
-      await new Promise(resolve => setTimeout(resolve, 1500));
     }
     
-    const response = await axios.get(OPTION_CHAIN_URL, {
-      headers: getHeaders(),
-      timeout: 15000,
+    const response = await client.get(OPTION_CHAIN_URL, {
+      headers: getBrowserHeaders(true),
+      timeout: 20000,
       validateStatus: () => true,
     });
     
     res.json({
       status: response.status,
-      statusText: response.statusText,
-      dataType: typeof response.data,
-      isArray: Array.isArray(response.data),
-      topLevelKeys: response.data ? Object.keys(response.data) : [],
-      hasCookies: !!cookies,
-      cookieLength: cookies.length,
-      dataPreview: JSON.stringify(response.data).substring(0, 2000),
+      cookies: jar.getCookiesSync(NSE_BASE_URL).length,
+      dataKeys: response.data ? Object.keys(response.data) : [],
+      preview: JSON.stringify(response.data).substring(0, 1000),
       fullData: response.data,
     });
   } catch (error) {
     res.status(500).json({
       error: error.message,
       stack: error.stack,
-      response: error.response?.data,
-      status: error.response?.status,
     });
   }
-});
-
-// Health check
-app.get('/health', (req, res) => {
-  res.json({
-    status: 'ok',
-    timestamp: new Date().toISOString(),
-    hasCache: !!cachedData,
-    hasCookies: !!cookies,
-    lastFetch: lastFetchTime ? new Date(lastFetchTime).toISOString() : null,
-  });
 });
 
 // Main endpoint
@@ -293,11 +268,9 @@ app.get('/chain', async (req, res) => {
     const data = await fetchOptionChain();
     res.json(data);
   } catch (error) {
-    console.error('[API] Error:', error.message);
     res.status(503).json({
-      error: 'Failed to fetch option chain data',
-      message: error.message,
-      suggestion: 'Check console logs or visit /debug endpoint',
+      error: error.message,
+      suggestion: 'NSE may be blocking automated requests. Consider using a proxy or Puppeteer.',
     });
   }
 });
@@ -306,20 +279,18 @@ app.get('/chain', async (req, res) => {
 app.get('/expiries', async (req, res) => {
   try {
     const data = await fetchOptionChain();
-    res.json({
-      expiryDates: data.records?.expiryDates || [],
-    });
+    res.json({ expiryDates: data.records?.expiryDates || [] });
   } catch (error) {
     res.status(503).json({ error: error.message });
   }
 });
 
-// Spot price
+// Spot
 app.get('/spot', async (req, res) => {
   try {
     const data = await fetchOptionChain();
     res.json({
-      underlyingValue: data.records?.underlyingValue || data.underlyingValue,
+      underlyingValue: data.records?.underlyingValue,
       timestamp: new Date().toISOString(),
     });
   } catch (error) {
@@ -327,39 +298,39 @@ app.get('/spot', async (req, res) => {
   }
 });
 
-// Start server
 app.listen(PORT, async () => {
   console.log(`
 ╔═══════════════════════════════════════════════════════════╗
-║       NIFTY Options Chain Backend (Debug Mode)            ║
+║       NIFTY Options Chain Backend Server                  ║
 ╠═══════════════════════════════════════════════════════════╣
-║  Server: http://localhost:${PORT}                            ║
+║  🌐 Server: http://localhost:${PORT}                         ║
 ║                                                           ║
-║  Endpoints:                                               ║
-║    GET /chain    - Option chain data                      ║
-║    GET /debug    - Detailed diagnostics                   ║
-║    GET /health   - Health check                           ║
-║    GET /spot     - Spot price                             ║
+║  📌 Endpoints:                                            ║
+║     GET /chain    - Option chain data                     ║
+║     GET /health   - Server status                         ║
+║     GET /debug    - Diagnostics                           ║
 ║                                                           ║
-║  📊 Check console for detailed logging                    ║
-║  📁 Raw responses saved to nse_response.json              ║
+║  ⚠️  NOTE: NSE has strong bot protection                  ║
+║     If you get 403 errors, you may need:                  ║
+║     - VPN/Proxy from India                                ║
+║     - Puppeteer-based solution                            ║
+║     - Official NSE data provider                          ║
 ╚═══════════════════════════════════════════════════════════╝
   `);
   
-  console.log('\n[Startup] 🚀 Initializing...\n');
-  
-  await initSession();
+  console.log('[Startup] 🚀 Attempting initial fetch...\n');
   
   try {
     await fetchOptionChain();
-    console.log('\n[Startup] ✅ Server ready!\n');
+    console.log('\n[Startup] ✅ Server ready and working!\n');
   } catch (error) {
-    console.error('\n[Startup] ⚠️ Initial fetch failed:', error.message);
-    console.log('[Startup] 💡 Server running - try /debug endpoint\n');
+    console.error('\n[Startup] ❌ Initial fetch failed');
+    console.error('[Startup] 💡 This is common with NSE\'s bot protection');
+    console.error('[Startup] 💡 The server is running - API calls may still work\n');
   }
 });
 
 process.on('SIGINT', () => {
-  console.log('\n[Server] 👋 Shutting down...');
+  console.log('\n👋 Shutting down...');
   process.exit(0);
 });
